@@ -93,18 +93,22 @@ script to extract melody segments and compute metadata:
 
 ```sh
 # Example: process the first 1,000 MIDI files and split each into
-# segments of 16 notes.  Adjust --segment-length and --max-files as needed.
-python -m ear_trainer.prepare_dataset \
-    --input-dir /path/to/unpacked_midi \
-    --output-json processed_melodies.json \
-    --segment-length 16 \
-    --max-files 1000
+# segments of 16 notes.  You can also segment by bars using
+# --segment-measures.  Adjust --segment-length, --segment-measures and
+# --max-files as needed.
+    python -m ear_trainer.prepare_dataset \
+        --input-dir /path/to/unpacked_midi \
+        --output-json processed_melodies.json \
+        --segment-length 16 \
+        # --segment-measures 4 \
+        --max-files 1000
 ```
 
-The script will flatten each MIDI file to a monophonic stream of
-notes, split it into fixed‑length chunks (if a segment length is
-provided) and compute statistical metadata (average interval, pitch
-span, rhythmic density, register and a composite complexity score).
+The script extracts a monophonic melody line from each MIDI file by
+selecting the highest note at each time position.  It can split the
+melody into fixed‑length note chunks or into groups of measures and then
+computes statistical metadata (average interval, pitch span, rhythmic
+density, register and a composite complexity score).
 It writes a list of segments to the specified JSON file.  You can then
 load this dataset in the application by calling
 `MelodyManager.load_from_json('processed_melodies.json')` before
