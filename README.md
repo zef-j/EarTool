@@ -26,6 +26,8 @@ real‑time evaluation.
   `soundfont.sf2` (or `FluidR3_GM.sf2`) in the `ear_trainer` directory.  If
   no SoundFont is found or `pyfluidsynth` is unavailable, the app
   falls back to sine‑wave synthesis.
+* Output melodies as MIDI events to any available port for playback in
+  external software such as a DAW.
 * Navigate through melodies manually (play/stop, next, previous) and
   shift the current melody up or down by octaves on the fly.
 * Optional automatic note detection via MIDI input or audio (microphone) using

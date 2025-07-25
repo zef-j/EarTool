@@ -21,8 +21,14 @@ import numpy as np
 import sounddevice as sd
 from typing import Optional
 import os
+import time
 
 from melody_manager import Melody, NoteEvent
+
+try:
+    import mido
+except ImportError:
+    mido = None
 
 try:
     import fluidsynth
@@ -64,6 +70,9 @@ class AudioPlayer:
         self.instrument: str = 'sine'
         self.synth: Optional[fluidsynth.Synth] = None if fluidsynth is None else None
         self.soundfont_id: Optional[int] = None
+        # MIDI output port name. When set, the player sends MIDI messages
+        # instead of synthesising audio directly.
+        self.midi_port_name: Optional[str] = None
         # Attempt to locate a default SoundFont file.  Users can place
         # 'soundfont.sf2' in the package directory or the project root to
         # enable FluidSynth.  Also recognise the commonly used
@@ -103,6 +112,15 @@ class AudioPlayer:
         If ``device_index`` is None, the system default will be used.
         """
         self.output_device = device_index
+
+    def set_midi_output(self, port_name: Optional[str]) -> None:
+        """Set the MIDI output port used for playback."""
+        self.midi_port_name = port_name
+
+    @staticmethod
+    def list_midi_outputs() -> list[str]:
+        """Return a list of available MIDI output port names."""
+        return mido.get_output_names() if mido is not None else []
 
     def set_instrument(self, name: str) -> None:
         """Change the playback instrument.
@@ -311,18 +329,37 @@ class AudioPlayer:
         self.stop()
         self.current_melody = melody
 
+        if self.midi_port_name and mido is not None:
+            def midi_thread():
+                beats_per_second = melody.tempo / 60.0
+                try:
+                    with mido.open_output(self.midi_port_name) as port:
+                        for event in melody.events:
+                            if self._stop_event.is_set():
+                                break
+                            port.send(mido.Message('note_on', note=event.pitch, velocity=event.velocity))
+                            dur = event.duration / beats_per_second
+                            elapsed = 0.0
+                            while elapsed < dur and not self._stop_event.is_set():
+                                step = min(0.01, dur - elapsed)
+                                time.sleep(step)
+                                elapsed += step
+                            port.send(mido.Message('note_off', note=event.pitch, velocity=0))
+                except Exception as exc:
+                    print(f"MIDI output error: {exc}")
+            self._play_thread = threading.Thread(target=midi_thread, daemon=True)
+            self._play_thread.start()
+            return
+
         def playback_thread():
             data = self._synthesize_melody(melody)
-            # Use a callback to allow stopping mid‑playback
             def callback(outdata, frames, time, status):
                 if self._stop_event.is_set():
                     raise sd.CallbackStop()
-                # Determine how many samples to copy for this block
                 start = callback.current_pos
                 end = start + frames
                 out_chunk = data[start:end]
                 if len(out_chunk) < frames:
-                    # Pad remainder with zeros
                     outdata[:len(out_chunk), 0] = out_chunk
                     outdata[len(out_chunk):, 0] = 0
                     raise sd.CallbackStop()
@@ -330,7 +367,6 @@ class AudioPlayer:
                     outdata[:, 0] = out_chunk
                 callback.current_pos = end
             callback.current_pos = 0
-            # Stream parameters: mono audio, chosen device
             device = self.output_device
             with sd.OutputStream(
                 samplerate=self.sample_rate,
@@ -339,7 +375,7 @@ class AudioPlayer:
                 callback=callback,
                 device=device,
             ):
-                self._stop_event.wait()  # Wait until callback stops or stop_event is set
+                self._stop_event.wait()
 
         self._play_thread = threading.Thread(target=playback_thread, daemon=True)
         self._play_thread.start()
