@@ -5,8 +5,10 @@ prepare_dataset.py
 This script processes a directory of MIDI or MusicXML files and
 extracts melodies into individual segments that can be used by the
 ear‑training application.  It reads every file in an input directory,
-parses it using music21, flattens to a single stream of notes,
-optionally segments long melodies into fixed‑length chunks, computes
+parses it using music21 and extracts a monophonic melody line.  By
+default the highest note at each time position is chosen to represent
+the melodic voice.  The script can optionally segment long melodies into
+fixed‑length chunks (by number of notes) or groups of measures, computes
 statistical metadata (average interval, span, note density, register
 and a composite complexity score) for each segment, and writes the
 results to a JSON file.  The resulting JSON can then be loaded by
@@ -39,6 +41,12 @@ Parameters
 ``--segment-length`` (optional)
     Maximum number of notes per segment.  If omitted, each file will
     produce a single melody containing all its notes.
+
+``--segment-measures`` (optional)
+    When provided, split melodies by groups of measures instead of by
+    note count.  The value specifies how many measures should be included
+    in each segment (e.g. ``4`` for four-bar phrases).  If omitted or
+    zero, segmentation by note count is used.
 
 ``--max-files`` (optional)
     Limit the number of files to process.  Useful for testing.
@@ -134,27 +142,87 @@ def segment_events(events: List[Dict[str, Any]], length: int) -> List[List[Dict[
     return segments
 
 
-def process_file(path: str, segment_length: int | None) -> List[Dict[str, Any]]:
+def segment_events_by_measures(events: List[Dict[str, Any]], bars: int, bar_qlen: float) -> List[List[Dict[str, Any]]]:
+    """Split events into segments based on a number of measures.
+
+    Parameters
+    ----------
+    events : list of dict
+        Note events in chronological order.
+    bars : int
+        Number of measures per segment.  If 0, a single segment is returned.
+    bar_qlen : float
+        Length of one measure in quarter lengths.
+    """
+    if not bars or bars <= 0:
+        return [events]
+    target = bars * bar_qlen
+    segments: List[List[Dict[str, Any]]] = []
+    current: List[Dict[str, Any]] = []
+    acc = 0.0
+    for ev in events:
+        current.append(ev)
+        acc += float(ev.get("duration", 0.0))
+        if acc >= target:
+            segments.append(current)
+            current = []
+            acc = 0.0
+    if current:
+        segments.append(current)
+    return segments
+
+
+def extract_melody_line(score: "m21.stream.Stream") -> List[Dict[str, Any]]:
+    """Return a monophonic melody line extracted from ``score``.
+
+    The highest sounding pitch at each time offset is chosen to represent the
+    melody.  Durations are taken from the chordified representation.
+    """
+    events: List[Dict[str, Any]] = []
+    try:
+        chordified = score.chordify()
+    except Exception:
+        chordified = score.flat
+    for element in chordified.flat.notes:
+        if isinstance(element, m21.chord.Chord):
+            pitch = max(p.midi for p in element.pitches)
+        elif isinstance(element, m21.note.Note):
+            pitch = element.pitch.midi
+        else:
+            continue
+        dur = float(element.quarterLength)
+        vel = int(getattr(element.volume, "velocity", 64) or 64)
+        events.append({"pitch": pitch, "duration": dur, "velocity": vel})
+    return events
+
+
+def process_file(path: str, segment_length: int | None, segment_measures: int | None = 0) -> List[Dict[str, Any]]:
     """Parse a single MIDI or MusicXML file and return a list of processed melody segments.
 
-    Each element in the returned list is a dictionary with keys:
-    ``events`` (list of event dicts), ``key`` (string), ``tempo`` (int), ``name`` (file name),
-    and computed metadata keys.
+    Parameters
+    ----------
+    path : str
+        Path to the MIDI/MusicXML file.
+    segment_length : int or None
+        Number of notes per segment when ``segment_measures`` is 0.
+    segment_measures : int or None
+        Number of measures per segment.  When greater than zero this
+        overrides ``segment_length``.
+
+    Returns
+    -------
+    list of dict
+        Each element is a dictionary with keys ``events``, ``key``, ``tempo``
+        and computed metadata.
     """
     try:
         score = m21.converter.parse(path)
     except Exception as exc:
         print(f"Could not parse {os.path.basename(path)}: {exc}")
         return []
-    # Flatten to a simple note stream
-    part = score.flatten().notes.stream()
-    events: List[Dict[str, Any]] = []
-    for element in part:
-        if isinstance(element, m21.note.Note):
-            midi_num = element.pitch.midi
-            duration = float(element.quarterLength)
-            velocity = int(element.volume.velocity or 64)
-            events.append({"pitch": midi_num, "duration": duration, "velocity": velocity})
+    # Extract a monophonic melody line using the highest sounding note at each
+    # time point.
+    events = extract_melody_line(score)
     if not events:
         return []
     # Key
@@ -191,7 +259,17 @@ def process_file(path: str, segment_length: int | None) -> List[Dict[str, Any]]:
                 chord_events.append({"pitches": pitches, "duration": dur})
     except Exception:
         chord_events = []
-    segments = segment_events(events, segment_length)
+    # Determine bar length from the first time signature (default 4/4)
+    bar_qlen = 4.0
+    try:
+        ts = score.recurse().getTimeSignatures()[0]
+        bar_qlen = float(ts.barDuration.quarterLength)
+    except Exception:
+        pass
+    if segment_measures and segment_measures > 0:
+        segments = segment_events_by_measures(events, segment_measures, bar_qlen)
+    else:
+        segments = segment_events(events, segment_length)
     processed: List[Dict[str, Any]] = []
     for seg_idx, seg_events in enumerate(segments):
         meta = compute_metadata(seg_events)
@@ -363,7 +441,7 @@ def process_csv(csv_path: str) -> List[Dict[str, Any]]:
 
 
 # -- CSV + MIDI processing ----------------------------------------------------
-def process_csv_with_midi(csv_path: str, midi_dir: str, segment_length: int | None) -> List[Dict[str, Any]]:
+def process_csv_with_midi(csv_path: str, midi_dir: str, segment_length: int | None, segment_measures: int | None = 0) -> List[Dict[str, Any]]:
     """Parse a CSV file referencing MIDI files and combine the metadata.
 
     This helper is designed to support datasets where a CSV file lists
@@ -383,11 +461,13 @@ def process_csv_with_midi(csv_path: str, midi_dir: str, segment_length: int | No
     midi_dir : str
         Directory containing MIDI files referenced by the CSV.
     segment_length : int or None
-        Maximum number of notes to include in each entry.  If 0 or None,
-        the entire MIDI file is used.  If greater than zero, the first
-        ``segment_length`` notes are taken.  This does not pre‑segment
-        multiple chunks from one file; instead it truncates a single
-        contiguous subsequence.
+        Maximum number of notes to include in each entry when
+        ``segment_measures`` is not used.  If 0 or None, the entire MIDI
+        file is used.
+    segment_measures : int or None
+        When greater than zero, split the MIDI file into segments of the
+        specified number of measures.  Only the first resulting segment is
+        used for each file in the CSV.
 
     Returns
     -------
@@ -425,17 +505,17 @@ def process_csv_with_midi(csv_path: str, midi_dir: str, segment_length: int | No
             if not midi_path:
                 print(f"Warning: MIDI file for row {row_index} ('{fname}') not found in {midi_dir}.")
                 continue
-            # Parse the MIDI file using process_file helper.  We request
-            # no segmentation (segment_length parameter) so that the
-            # entire file is represented as one segment.  Afterward, we
-            # optionally truncate the events based on segment_length.
-            file_entries = process_file(midi_path, 0)
+            # Parse the MIDI file using process_file helper.  We request no
+            # segmentation here so that the entire file is loaded and then
+            # optionally truncated or segmented below.
+            file_entries = process_file(midi_path, 0, segment_measures)
             if not file_entries:
                 continue
             # Use the first entry (only one, because segment_length=0)
             entry = file_entries[0]
             # Optionally truncate events to segment_length if provided and >0
-            if segment_length and segment_length > 0:
+            # only when measure-based segmentation is not active.
+            if segment_length and segment_length > 0 and not segment_measures:
                 entry['events'] = entry['events'][:segment_length]
                 # Recompute metadata for truncated events
                 meta_stats = compute_metadata(entry['events'])
@@ -465,6 +545,7 @@ def main() -> None:
     parser.add_argument("--input-dir", required=False, default=None, help="Directory containing MIDI/MusicXML files to process. Not required when --csv-file is used.")
     parser.add_argument("--output-json", required=True, help="Path to write the resulting JSON dataset.")
     parser.add_argument("--segment-length", type=int, default=0, help="Maximum number of notes per segment (0 for no segmentation).")
+    parser.add_argument("--segment-measures", type=int, default=0, help="Number of measures per segment when splitting by bars (0 to disable).")
     parser.add_argument("--max-files", type=int, default=0, help="Maximum number of files to process (0 for all).")
     parser.add_argument("--h5-dir", default=None, help="Directory containing corresponding .h5 metadata files (optional). If provided, metadata from matching h5 files will be attached to each segment.")
     # Optional CSV file input.  When provided, the script processes the CSV
@@ -476,6 +557,7 @@ def main() -> None:
     in_dir: Optional[str] = args.input_dir
     out_path: str = args.output_json
     seg_len: int = args.segment_length
+    seg_measures: int = args.segment_measures
     max_files: int = args.max_files
     h5_dir: Optional[str] = args.h5_dir
     csv_file: Optional[str] = args.csv_file
@@ -487,7 +569,7 @@ def main() -> None:
     if csv_file:
         try:
             if args.midi_dir:
-                all_entries = process_csv_with_midi(csv_file, args.midi_dir, seg_len)
+                all_entries = process_csv_with_midi(csv_file, args.midi_dir, seg_len, seg_measures)
             else:
                 all_entries = process_csv(csv_file)
         except Exception as exc:
@@ -510,7 +592,7 @@ def main() -> None:
                     if max_files and processed_count >= max_files:
                         break
                     path = os.path.join(root, fname)
-                    entries = process_file(path, seg_len)
+                    entries = process_file(path, seg_len, seg_measures)
                     # Attach file_path and metadata to each segment
                     if entries:
                         for seg in entries:
