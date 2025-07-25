@@ -17,6 +17,11 @@ from __future__ import annotations
 from typing import List, Optional
 
 from PySide6.QtCore import Qt
+
+try:
+    import mido
+except ImportError:
+    mido = None
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -341,6 +346,13 @@ class EarTrainerGUI(QMainWindow):
         controls_layout.addWidget(QLabel("Instrument:"))
         controls_layout.addWidget(self.instrument_combo)
 
+        # MIDI output selection
+        self.midi_out_combo = QComboBox()
+        self._update_midi_outputs()
+        self._on_midi_out_changed()
+        controls_layout.addWidget(QLabel("MIDI Out:"))
+        controls_layout.addWidget(self.midi_out_combo)
+
         # Octave shift buttons
         self.octave_down_btn = QPushButton("Octave -")
         controls_layout.addWidget(self.octave_down_btn)
@@ -430,6 +442,7 @@ class EarTrainerGUI(QMainWindow):
         self.metadata_edit.textChanged.connect(self._rebuild_dataset)
         # Instrument selection
         self.instrument_combo.currentIndexChanged.connect(self._on_instrument_changed)
+        self.midi_out_combo.currentIndexChanged.connect(self._on_midi_out_changed)
         # Octave shift buttons
         self.octave_down_btn.clicked.connect(self._on_octave_down)
         self.octave_up_btn.clicked.connect(self._on_octave_up)
@@ -915,6 +928,12 @@ class EarTrainerGUI(QMainWindow):
             # Manual mode: no input devices needed
             self.input_combo.addItem("(none)")
 
+    def _update_midi_outputs(self) -> None:
+        """Populate the MIDI output combobox."""
+        self.midi_out_combo.clear()
+        names = self.player.list_midi_outputs() if hasattr(self.player, 'list_midi_outputs') else []
+        self.midi_out_combo.addItems(names)
+
     def _start_detection(self, melody: Melody) -> None:
         """Start the appropriate detector based on mode."""
         mode = self.detect_mode.currentText()
@@ -953,6 +972,11 @@ class EarTrainerGUI(QMainWindow):
         name = self.instrument_combo.currentText()
         # Update player instrument
         self.player.set_instrument(name)
+
+    def _on_midi_out_changed(self) -> None:
+        """Handle selection of a MIDI output port."""
+        name = self.midi_out_combo.currentText()
+        self.player.set_midi_output(name if name else None)
 
     def _on_octave_up(self) -> None:
         """Shift the current melody up one octave."""
